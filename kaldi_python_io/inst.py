@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # wujian@2018
+# Updated GeekOrangeLuyao@2020
 """
     Simple wrapper for _io_kernel.py
     - ArchiveReader
@@ -8,6 +9,7 @@
     - AlignArchiveReader
     - AlignScriptReader
     - Nnet3EgsReader
+    - SynchronizedScriptReader
 """
 
 import os
@@ -18,6 +20,8 @@ import warnings
 import _thread
 import threading
 import subprocess
+import queue
+from multiprocessing import Lock
 
 from io import TextIOWrapper
 
@@ -26,7 +30,7 @@ from . import _io_kernel as io
 
 __all__ = [
     "ArchiveReader", "ScriptReader", "AlignArchiveReader", "AlignScriptReader",
-    "ArchiveWriter", "Nnet3EgsReader", "Reader"
+    "ArchiveWriter", "Nnet3EgsReader", "Reader", "SynchronizedScriptReader"
 ]
 
 
@@ -98,6 +102,7 @@ class ext_open(object):
         ...
     
     """
+
     def __init__(self, fname, mode):
         self.fname = fname
         self.mode = mode
@@ -146,6 +151,7 @@ class Reader(object):
     """
         Base class for sequential/random accessing, to be implemented
     """
+
     def __init__(self, scp_path, **kwargs):
         self.index_dict = parse_scps(scp_path, **kwargs)
         self.index_keys = list(self.index_dict.keys())
@@ -188,6 +194,7 @@ class Writer(object):
     """
         Base class, to be implemented
     """
+
     def __init__(self, ark_path, scp_path=None):
         self.scp_path = scp_path
         self.ark_path = ark_path
@@ -215,6 +222,7 @@ class SequentialReader(object):
     """
         Base class for sequential reader(only for .ark/.egs)
     """
+
     def __init__(self, ark_or_pipe):
         self.ark_or_pipe = ark_or_pipe
 
@@ -226,6 +234,7 @@ class ScriptReader(Reader):
     """
         Reader for kaldi's scripts(for BaseFloat matrix)
     """
+
     def __init__(self, ark_scp):
         self.fmgr = dict()
 
@@ -257,10 +266,52 @@ class ScriptReader(Reader):
         return obj
 
 
+class SynchronizedScriptReader(Reader):
+    """
+        Reader for kaldi's scripts(for BaseFloat matrix)
+        Use Lock to make the safety
+    """
+
+    def __init__(self, ark_scp):
+        # we add a mutex for every
+        # we use the multiprocessing.Lock(), not threading.Lock()
+        self.fmgr = dict()
+
+        def addr_processor(addr):
+            addr_token = addr.split(":")
+            if len(addr_token) == 1:
+                raise ValueError("Unsupported scripts address format")
+            path, offset = ":".join(addr_token[0:-1]), int(addr_token[-1])
+            return (path, offset)
+
+        super(SynchronizedScriptReader, self).__init__(ark_scp,
+                                                       value_processor=addr_processor)
+
+    def __del__(self):
+        for name in self.fmgr:
+            self.fmgr[name]['handle'].close()
+            self.fmgr[name]['mutex'].release()
+
+    def _load(self, key):
+        path, addr = self.index_dict[key]
+
+        if path not in self.fmgr:
+            self.fmgr[path]['handle'] = open(path, "rb")
+            self.fmgr[path]['mutex']  = Lock()
+
+        fd = self.fmgr[path]['handle']
+        mutex: Lock = self.fmgr[path]['mutex']
+        with mutex:
+            fd.seek(addr)
+            obj = io.read_float_mat_vec(fd, direct_access=True)
+        return obj
+
+
 class ArchiveReader(SequentialReader):
     """
         Sequential Reader for Kalid's archive(.ark) object
     """
+
     def __init__(self, ark_or_pipe):
         super(ArchiveReader, self).__init__(ark_or_pipe)
 
@@ -274,6 +325,7 @@ class Nnet3EgsReader(SequentialReader):
     """
         Sequential Reader for Kalid's nnet3 .egs object
     """
+
     def __init__(self, ark_or_pipe):
         super(Nnet3EgsReader, self).__init__(ark_or_pipe)
 
@@ -287,6 +339,7 @@ class AlignArchiveReader(SequentialReader):
     """
         Reader for kaldi's alignment archives
     """
+
     def __init__(self, ark_or_pipe):
         super(AlignArchiveReader, self).__init__(ark_or_pipe)
 
@@ -300,6 +353,7 @@ class AlignScriptReader(ScriptReader):
     """
         Reader for kaldi's scripts(for int32 vector, such as alignments)
     """
+
     def __init__(self, ark_scp):
         super(AlignScriptReader, self).__init__(ark_scp)
 
@@ -314,6 +368,7 @@ class ArchiveWriter(Writer):
     """
         Writer for kaldi's archive && scripts (for BaseFloat matrix)
     """
+
     def __init__(self, ark_path, scp_path=None):
         super(ArchiveWriter, self).__init__(ark_path, scp_path)
 

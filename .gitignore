@@ -6,6 +6,7 @@ build/
 dist/
 
 .vscode/
+.idea/
 
 asset/foo.*
 
